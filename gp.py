@@ -270,6 +270,7 @@ class GP(nn.Module):
         super().__init__()
         #torch.manual_seed(12)
         #np.random.seed(12)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.kernel_ = kernel
         self.method = method
         self.M = M
@@ -291,6 +292,8 @@ class GP(nn.Module):
                 Z_np = init_Z_kmeanspp(X.cpu().numpy(), M)
                 Z_t = torch.from_numpy(Z_np).to(self.X.device).to(self.X.dtype)
                 self.Z_ = nn.Parameter(Z_t.clone())
+                #self.Z_.requires_grad = False  # Freeze Z
+
             elif method == "proj-sphere":
                 self.w = np.random.randn(y.shape[0], M)
                 self.w /= np.linalg.norm(self.w, axis=0, keepdims=True)
@@ -318,17 +321,29 @@ class GP(nn.Module):
             if method.startswith("proj"):
                 self.w, _ = np.linalg.qr(self.w)  # orthogonalize columns
         
+        #if hypers is None:
+        #    if self.kernel_ == 'SE' or self.kernel_ == 'Laplace':
+        #        self.hypers_ = nn.Parameter(torch.tensor(np.log([1.0, 1.0, 1.0])))
+        #    elif self.kernel_ == 'RQ' or self.kernel_ == 'Per':
+        #        self.hypers_ = nn.Parameter(torch.tensor(np.log([1.0, 1.0, 1.0, 1.0])))
+        #    elif self.kernel_ == 'LocPer':
+        #        self.hypers_ = nn.Parameter(torch.tensor(np.log([1.0, 1.0, 1.0, 1.0, 1.0])))
+        #else:
+        #    self.hypers_ = nn.Parameter(torch.tensor(np.log(hypers)))
+
         if hypers is None:
             if self.kernel_ == 'SE' or self.kernel_ == 'Laplace':
-                self.hypers_ = nn.Parameter(torch.tensor(np.log([1.0, 1.0, 1.0])))
+                h_np = np.log([1.0, 1.0, 1.0])
             elif self.kernel_ == 'RQ' or self.kernel_ == 'Per':
-                self.hypers_ = nn.Parameter(torch.tensor(np.log([1.0, 1.0, 1.0, 1.0])))
+                h_np = np.log([1.0, 1.0, 1.0, 1.0])
             elif self.kernel_ == 'LocPer':
-                self.hypers_ = nn.Parameter(torch.tensor(np.log([1.0, 1.0, 1.0, 1.0, 1.0])))
+                h_np = np.log([1.0, 1.0, 1.0, 1.0, 1.0])
         else:
-            self.hypers_ = nn.Parameter(torch.tensor(np.log(hypers)))
+            h_np = np.log(hypers)
 
 
+        h_t  = torch.from_numpy(h_np).to(device)
+        self.hypers_ = nn.Parameter(h_t.clone())
     
     @property
     def hypers(self):
@@ -490,11 +505,11 @@ class GP(nn.Module):
         X = self.X
         y = self.y
         Z = self.Z # define Z (inducing locs) somewhere
-        a, _ = torch.sort(Z.T)
-        a = torch.diff(a)
-        a = torch.min(a)
-        if a<0.5:
-            print(f'Warning: inducing input are getting as close as {a.detach().numpy()}')
+        #a, _ = torch.sort(Z.T)
+        #a = torch.diff(a)
+        #a = torch.min(a)
+        #if a<0.5:
+        #    print(f'Warning: inducing input are getting as close as {a.detach().numpy()}')
         N = X.shape[0]
         #log_ls, log_var, log_sig = self.log_lengthscale, self.log_variance, self.log_noise
         amplitude_scale = self.hypers[0]
@@ -543,8 +558,9 @@ class GP(nn.Module):
         trace_term = (diagKxx.sum() - trace_Qff) / sigma2
 
         elbo = -0.5 * (N * torch.log(torch.tensor(2.0*np.pi, device=X.device)) + logdetB + quad + trace_term)
-        lambda_repulse = 10000
-        return elbo - lambda_repulse * repulsive_loss(self.Z_, scale=1.0, min_dist=3.0)
+        lambda_repulse = 1000
+        return elbo - lambda_repulse * repulsive_loss(self.Z_, scale=1.0, min_dist=1.0)
+        #return elbo
 
     def kernel_mat_self(self, X, add_noise = True):
         if self.kernel_ == 'SE':
@@ -797,7 +813,7 @@ class GP(nn.Module):
     
         end = time.perf_counter()     # end timer
         elapsed = float(end - start)
-        achieved_nll = float(self.nll().detach().numpy().flatten())
+        achieved_nll = float(self.nll().detach().cpu().numpy().flatten())
         if verbose: 
             print(f"Elapsed time: {elapsed:.1f}[s] with NLL = {achieved_nll:.2f}")
 
