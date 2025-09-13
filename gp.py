@@ -186,13 +186,56 @@ def safe_cholesky(K, max_tries=6, initial_jitter=1e-6):
     # Eigenvalue-based fallback
     print("[safe_cholesky] Falling back to negative-eigenvalue shift")
     eigvals = torch.linalg.eigvalsh(K)
+    
     min_eig = torch.min(eigvals)
     if min_eig < 0:
         shift = (-min_eig + 1e-8)  # small epsilon to make PD
         K += shift * I
         print(f"[safe_cholesky] Added diagonal shift {shift:.2e} based on min eigenvalue")
     L = torch.linalg.cholesky(K)
+
     return L
+
+def safe_cholesky_experimental(K, max_tries=6, initial_jitter=1e-6):
+    """Attempt Cholesky decomposition with adaptive jitter.
+    - Runs on GPU if available
+    - Falls back to CPU if running on MPS (since Cholesky isn't supported there)
+    """
+    # Detect if we're on MPS
+    use_cpu = (K.device.type == "mps")
+
+    if use_cpu:
+        K = K.cpu()
+    
+    jitter = initial_jitter
+    I = torch.eye(K.size(0), device=K.device, dtype=K.dtype)
+
+    # Symmetrize to avoid numerical asymmetry
+    K = 0.5 * (K + K.T)
+
+    for i in range(max_tries):
+        try:
+            L = torch.linalg.cholesky(K + jitter * I)
+            return L.to(K.device) if use_cpu else L
+        except RuntimeError as e:
+            if "cholesky" in str(e).lower() or "not positive-definite" in str(e).lower():
+                jitter *= 10
+                print(f"[safe_cholesky] Failed, retrying with jitter={jitter:.1e}")
+            else:
+                raise
+
+    # Eigenvalue-based fallback
+    print("[safe_cholesky] Falling back to negative-eigenvalue shift")
+    eigvals = torch.linalg.eigvalsh(K)
+    
+    min_eig = torch.min(eigvals)
+    if min_eig < 0:
+        shift = (-min_eig + 1e-8)  # small epsilon to make PD
+        K += shift * I
+        print(f"[safe_cholesky] Added diagonal shift {shift:.2e} based on min eigenvalue")
+    L = torch.linalg.cholesky(K)
+
+    return L.to(torch.float32).to(K.device) if use_cpu else L
 
 
 
@@ -270,14 +313,27 @@ class GP(nn.Module):
         super().__init__()
         #torch.manual_seed(12)
         #np.random.seed(12)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        #elif torch.backends.mps.is_available():
+        #    device = torch.device("mps")  # Apple Silicon
+        else:
+            device = torch.device("cpu")
+
+        print(f"Using device: {device}")
+
         self.kernel_ = kernel
         self.method = method
         self.M = M
+
         if X is not None and y is not None:
             # If 1D input (shape N x 1)
             if X.ndim == 2 and X.shape[1] == 1:
                 sort_idx = torch.argsort(X[:, 0])
+                sort_idx = sort_idx.to("cpu")   # make sure indices live on the same device as x
+
+                #print(sort_idx.device)
                 self.X = X[sort_idx]
                 self.y = y[sort_idx]
             else:
@@ -461,7 +517,7 @@ class GP(nn.Module):
         kernel = kernel"""
         X, y = self.X, self.y
         N = X.shape[0]
-        K = self.kernel_mat_self(X) + jitter * torch.eye(N, device=X.device)
+        K = self.kernel_mat_self(X) + 0*jitter * torch.eye(N, device=X.device)
         L = safe_cholesky(K)
         alpha = torch.cholesky_solve(y, L)  # cleaner than nested solve
             # log marginal likelihood
@@ -751,6 +807,7 @@ class GP(nn.Module):
         no_improve_count = 0  # counter for consecutive non-improving steps
         max_no_improve = 5    # M consecutive steps to trigger early stopping (choose your M)
 
+        print(f'norma: {self.hypers}')
             
         start = time.perf_counter()
         for epoch in range(n_steps):
