@@ -5,10 +5,10 @@ import time
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 
-def sphere_with_repulsion(d, M, n_iter=100, lr=0.05, seed=None):
+def sphere_with_repulsion(d, M, n_iter=200, lr=0.1, seed=None):
     """
     Sample M unit vectors in R^d roughly uniformly on the sphere,
-    using random init + repulsion dynamics.
+    using random init + repulsion dynamics (vectorized version).
 
     Args:
         d (int): dimension of ambient space
@@ -24,19 +24,21 @@ def sphere_with_repulsion(d, M, n_iter=100, lr=0.05, seed=None):
     W = rng.standard_normal((d, M))
     W /= np.linalg.norm(W, axis=0, keepdims=True)  # project to unit sphere
 
+    start_time = time.time()
+
     for _ in range(n_iter):
-        # Pairwise dot products
         G = W.T @ W  # (M, M)
         np.fill_diagonal(G, 0.0)
-
-        # Repulsion force = push away proportional to dot product
-        F = W @ G  # shape (d, M)
-
-        # Update and renormalize
-        W = W + lr * F
+        F = - W @ G  # minus sign for repulsion
+        W += lr * F
         W /= np.linalg.norm(W, axis=0, keepdims=True)
 
+    end_time = time.time()
+    print(f"Repulsion running time: {end_time - start_time:.4f} seconds")
+
     return W
+
+
 
 def repulsive_loss(Z, scale=1.0, min_dist=2.0):
     # Z: torch tensor shape (M, D)
@@ -244,7 +246,8 @@ def plot_gp(
     x, mu, var, ax=None, 
     color_mean="b", color_fill="lightblue", label="GP mean", title = "GP posterior",
     X_obs=None, y_obs=None, color_obs="k",
-    X_latent=None, y_latent=None, color_latent="r", marker_latent="."
+    X_latent=None, y_latent=None, color_latent="r", marker_latent=".", 
+    xlim1 = None, xlim2 = None
 ):
     """
     Plot GP mean with ±2 stddev confidence interval, optionally including
@@ -269,6 +272,11 @@ def plot_gp(
     x_sorted = x[sort_idx]
     mu_sorted = mu[sort_idx]
     std_sorted = torch.sqrt(var[sort_idx])
+
+    if xlim1 is None:
+        xlim1 = x_sorted[0]
+    if xlim2 is None:
+        xlim2 = x_sorted[-1]
 
     # Convert to numpy
     x_np = x_sorted.detach().cpu().numpy().ravel()
@@ -296,8 +304,9 @@ def plot_gp(
     if X_obs is not None and y_obs is not None:
         X_obs_np = X_obs.detach().cpu().numpy().ravel()
         y_obs_np = y_obs.detach().cpu().numpy().ravel()
-        ax.plot(X_obs_np, y_obs_np, color_obs + "x", label="Observations", markersize=4)
+        ax.plot(X_obs_np, y_obs_np, color_obs + ".", label="Observations", markersize=4)
 
+    ax.set_xlim([xlim1, xlim2])
     ax.set_xlabel("x")
     ax.set_ylabel("f(x)")
     ax.legend()
@@ -331,7 +340,6 @@ class GP(nn.Module):
             # If 1D input (shape N x 1)
             if X.ndim == 2 and X.shape[1] == 1:
                 sort_idx = torch.argsort(X[:, 0])
-                sort_idx = sort_idx.to("cpu")   # make sure indices live on the same device as x
 
                 #print(sort_idx.device)
                 self.X = X[sort_idx]
@@ -806,8 +814,6 @@ class GP(nn.Module):
         prev_loss = np.inf
         no_improve_count = 0  # counter for consecutive non-improving steps
         max_no_improve = 5    # M consecutive steps to trigger early stopping (choose your M)
-
-        print(f'norma: {self.hypers}')
             
         start = time.perf_counter()
         for epoch in range(n_steps):
