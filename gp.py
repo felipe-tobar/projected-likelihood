@@ -8,7 +8,7 @@ from sklearn.cluster import KMeans
 def sphere_with_repulsion(d, M, n_iter=200, lr=0.1, seed=None):
     """
     Sample M unit vectors in R^d roughly uniformly on the sphere,
-    using random init + repulsion dynamics (vectorized version).
+    using random init + repulsion dynamics.
 
     Args:
         d (int): dimension of ambient space
@@ -154,15 +154,6 @@ def random_one_hot_matrix(N, M, seed=None):
     
     return W
 
-def split_into_three(M):
-    base = M // 3
-    remainder = M % 3
-
-    parts = [base] * 3
-    for i in range(remainder):
-        parts[i] += 1
-
-    return parts
 
 def safe_cholesky(K, max_tries=6, initial_jitter=1e-6):
     """Attempt Cholesky decomposition with adaptive jitter.
@@ -197,48 +188,6 @@ def safe_cholesky(K, max_tries=6, initial_jitter=1e-6):
     L = torch.linalg.cholesky(K)
 
     return L
-
-def safe_cholesky_experimental(K, max_tries=6, initial_jitter=1e-6):
-    """Attempt Cholesky decomposition with adaptive jitter.
-    - Runs on GPU if available
-    - Falls back to CPU if running on MPS (since Cholesky isn't supported there)
-    """
-    # Detect if we're on MPS
-    use_cpu = (K.device.type == "mps")
-
-    if use_cpu:
-        K = K.cpu()
-    
-    jitter = initial_jitter
-    I = torch.eye(K.size(0), device=K.device, dtype=K.dtype)
-
-    # Symmetrize to avoid numerical asymmetry
-    K = 0.5 * (K + K.T)
-
-    for i in range(max_tries):
-        try:
-            L = torch.linalg.cholesky(K + jitter * I)
-            return L.to(K.device) if use_cpu else L
-        except RuntimeError as e:
-            if "cholesky" in str(e).lower() or "not positive-definite" in str(e).lower():
-                jitter *= 10
-                print(f"[safe_cholesky] Failed, retrying with jitter={jitter:.1e}")
-            else:
-                raise
-
-    # Eigenvalue-based fallback
-    print("[safe_cholesky] Falling back to negative-eigenvalue shift")
-    eigvals = torch.linalg.eigvalsh(K)
-    
-    min_eig = torch.min(eigvals)
-    if min_eig < 0:
-        shift = (-min_eig + 1e-8)  # small epsilon to make PD
-        K += shift * I
-        print(f"[safe_cholesky] Added diagonal shift {shift:.2e} based on min eigenvalue")
-    L = torch.linalg.cholesky(K)
-
-    return L.to(torch.float32).to(K.device) if use_cpu else L
-
 
 
 
@@ -320,13 +269,8 @@ def plot_gp(
 class GP(nn.Module):
     def __init__(self, X = None, y = None, kernel = 'SE', hypers = None, M=50, method = 'NLL'):
         super().__init__()
-        #torch.manual_seed(12)
-        #np.random.seed(12)
-        #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         if torch.cuda.is_available():
             device = torch.device("cuda")
-        #elif torch.backends.mps.is_available():
-        #    device = torch.device("mps")  # Apple Silicon
         else:
             device = torch.device("cpu")
 
@@ -351,12 +295,9 @@ class GP(nn.Module):
             if method == 'NLL':
                 1
             elif method == 'VFE':
-                #perm = torch.randperm(X.shape[0])[:M]       # random indices
-                #self.Z_ = nn.Parameter(X[perm].clone())      # choose those rows
                 Z_np = init_Z_kmeanspp(X.cpu().numpy(), M)
                 Z_t = torch.from_numpy(Z_np).to(self.X.device).to(self.X.dtype)
                 self.Z_ = nn.Parameter(Z_t.clone())
-                #self.Z_.requires_grad = False  # Freeze Z
 
             elif method == "proj-sphere":
                 self.w = np.random.randn(y.shape[0], M)
@@ -385,16 +326,7 @@ class GP(nn.Module):
             if method.startswith("proj"):
                 self.w, _ = np.linalg.qr(self.w)  # orthogonalize columns
         
-        #if hypers is None:
-        #    if self.kernel_ == 'SE' or self.kernel_ == 'Laplace':
-        #        self.hypers_ = nn.Parameter(torch.tensor(np.log([1.0, 1.0, 1.0])))
-        #    elif self.kernel_ == 'RQ' or self.kernel_ == 'Per':
-        #        self.hypers_ = nn.Parameter(torch.tensor(np.log([1.0, 1.0, 1.0, 1.0])))
-        #    elif self.kernel_ == 'LocPer':
-        #        self.hypers_ = nn.Parameter(torch.tensor(np.log([1.0, 1.0, 1.0, 1.0, 1.0])))
-        #else:
-        #    self.hypers_ = nn.Parameter(torch.tensor(np.log(hypers)))
-
+       
         if hypers is None:
             if self.kernel_ == 'SE' or self.kernel_ == 'Laplace':
                 h_np = np.log([1.0, 1.0, 1.0])
@@ -569,13 +501,7 @@ class GP(nn.Module):
         X = self.X
         y = self.y
         Z = self.Z # define Z (inducing locs) somewhere
-        #a, _ = torch.sort(Z.T)
-        #a = torch.diff(a)
-        #a = torch.min(a)
-        #if a<0.5:
-        #    print(f'Warning: inducing input are getting as close as {a.detach().numpy()}')
         N = X.shape[0]
-        #log_ls, log_var, log_sig = self.log_lengthscale, self.log_variance, self.log_noise
         amplitude_scale = self.hypers[0]
 
         sigma2 = self.hypers[-1]
@@ -596,7 +522,6 @@ class GP(nn.Module):
         #TERM2
         # A = Kzz + (1/σ^2) Kzx Kxz = Kzz + (1/σ^2) Kzx @ Kxz
         A = Kzz + (Kzx @ Kxz) / sigma2
-        #La = torch.linalg.cholesky(A)
         La = safe_cholesky(A)
 
 
@@ -850,15 +775,6 @@ class GP(nn.Module):
             if opt_name == "BFGS" and epoch % 10 == 0 and verbose:
                 print(f"Epoch {epoch}: loss = {loss.item():.4f}")
 
-            #######
-            #if abs(prev_loss - loss.item()) < tol:
-            #    if verbose: 
-            #        print(f"Early stop at iteration {epoch}.")
-            #    break
-            #prev_loss = loss.item()
-            ########
-
- 
 
             # check improvement
             if abs(prev_loss - loss.item()) < tol:
@@ -886,30 +802,3 @@ class GP(nn.Module):
             "nll" : achieved_nll
         }
 
-
-        ## The following part is not working and not used, fix it if training trajectories needed
-        if False:
-            if self.kernel_ == 'SE' or self.kernel_ == 'Laplace':
-                return {
-                "loss": loss.item(),
-                "length": self.hypers[1].detach().cpu(),
-                "noise": self.hypers[2].detach().cpu(),
-                "amplitude": self.hypers[0].detach().cpu(),
-                #"Z": self.Z.detach().cpu(),
-                }
-            elif self.kernel_ == 'Per':
-                return {
-                "loss": loss.item(),
-                "length": self.hypers[1].detach().cpu(),
-                "noise": self.hypers[3].detach().cpu(),
-                "period": self.hypers[2].detach().cpu(),
-                "amplitude": self.hypers[0].detach().cpu(),
-                }
-            elif self.kernel_ == 'RQ':
-                return {
-                "loss": loss.item(),
-                "length": self.hypers[1].detach().cpu(),
-                "noise": self.hypers[3].detach().cpu(),
-                "alpha": self.hypers[2].detach().cpu(),
-                "amplitude": self.hypers[0].detach().cpu(),
-                }
